@@ -13,7 +13,7 @@
 import comms
 
 def main():
-  udp_bridge = comms.UdpBridge('localhost', 9000, '/dev/null')
+  udp_bridge = comms.UdpBridge()
   udp_bridge.Loop()
 
 if __name__ == '__main__':
