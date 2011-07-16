@@ -10,6 +10,7 @@
 # <http://www.gnu.org/licenses/>.
 
 
+import json
 import random
 import socket
 import struct
@@ -46,7 +47,7 @@ class SerialSender(FrameSender):
 
 class UdpSender(FrameSender):
   """Sends a 8x8x4bpp RGB frame to rainbowduino over UDP to a server."""
-  def __init__(self, host, port):
+  def __init__(self, host='localhost', port=9000):
     self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.host_port = (host, port)
     self.last_frame = ''
@@ -55,17 +56,15 @@ class UdpSender(FrameSender):
     self.s.close()
 
   def Send(self, packed_frame):
-    print 'Sending...'
     if self.last_frame == packed_frame:
       return
     self.last_frame = packed_frame
     self.s.sendto(packed_frame, self.host_port)
-    print 'Sent...'
 
 
 class UdpBridge(object):
   """Receives a 8x8x4bpp RGB frame from UDP and sends to rainbowduino over serial."""
-  def __init__(self, host, port, serial):
+  def __init__(self, host='localhost', port=9000, serial='/dev/ttyUSB0'):
     self.serial_frame = SerialSender(serial)
     self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.s.bind((host, port))
