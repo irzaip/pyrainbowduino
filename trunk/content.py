@@ -10,13 +10,13 @@
 # <http://www.gnu.org/licenses/>.
 
 
+import comms
 import datetime
 import json
 import png
 import random
 import struct
 import time
-import urllib
 
 
 class PngFontReader(object):
@@ -69,44 +69,24 @@ class CharFrame(object):
     return ret
 
 
-class FrameSender(object):
-  """Sends a 8x8x4bpp RGB frame to rainbowduino over serial."""
-  def __init__(self):
-    self.serial = file('/dev/ttyUSB0', 'w')
-    self.last_frame = None
-
-  def Close():
-    self.serial.close()
-
-  def Send(self, frame):
-    if self.last_frame == frame:
-      return
-    self.last_frame = frame
-    d = struct.pack('B' * 8 * 12, *frame)
-    self.serial.write(d)
-    self.serial.flush()
-
-
-def Randomness():
+def Randomness(frame_sender):
   """Some randomness to check things blink."""
   frame = []
   frame += [0xf0,0x07, 0x07, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
   frame += [0x0f,0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
   frame += [0x00,0xf0, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
   frame += [0] * (96 - len(frame))
-  sender = FrameSender()
-  sender.Send(frame)
   frame = [0, 0xf0, 0x0f, 0x77, 0x70, 0x07]
   frame = (frame * 20)[:96]
   while True:
     random.shuffle(frame)
-    sender.Send(frame)
+    frame_sender.Send(comms.FrameSender.PackFrame(frame))
     time.sleep(0.2)
 
 
 class Pattern(object):
-  def __init__(self):
-    self.sender = FrameSender()
+  def __init__(self, frame_sender):
+    self.frame_sender = frame_sender
     self.red = [x for x in [0x07, 0xf0, 0x00] * 32]
     self.green = [x for x in [0x70, 0x00, 0x0f] * 32]
     self.blue = [x for x in [0x00, 0x07, 0xf0] * 32]
@@ -115,29 +95,30 @@ class Pattern(object):
     self.gb = [x for x in [0x70, 0x07, 0x00] * 32]
 
   @staticmethod
-  def Renderer():
+  def Renderer(frame_sender):
     pattern = Pattern()
     while True:
       for p in [pattern.red,
                 pattern.green,
                 pattern.blue,
                 pattern.rg, pattern.rb, pattern.gb]:
-        pattern.sender.Send(p)
+        pattern.frame_sender.Send(comms.FrameSender.PackFrame(p))
         time.sleep(0.2)
 
 
 class CharRenderer(object):
-  def __init__(self, char_frame):
+  def __init__(self, char_frame, frame_sender):
     self.char_frame = char_frame
     self.ticker = 0
     self.delta = 1
-    self.sender = FrameSender()
+    self.frame_sender = frame_sender
 
   def SendCharAndWait(self, char, wait):
-    self.sender.Send(self.char_frame.ForChar(str(char)))
+    frame = self.char_frame.ForChar(str(char))
+    self.frame_sender.Send(comms.FrameSender.PackFrame(frame))
     time.sleep(wait)
 
-  def SendTickerStringAndWait(self, string, wait):
+  def SendTickerElementAndWait(self, string, wait):
     self.ticker += self.delta
     if self.ticker >= (len(string) - 1) * 8:
       self.delta *= -1
@@ -145,13 +126,19 @@ class CharRenderer(object):
     elif self.ticker <= 0:
       self.delta *= -1
       self.ticker = 0
-    self.sender.Send(self.char_frame.ForString(string, self.ticker))
+    frame = self.char_frame.ForString(string, self.ticker)
+    self.frame_sender.Send(comms.FrameSender.PackFrame(frame))
     time.sleep(wait)
+    
+  def SendFullStringAndWait(self, string, wait):
+    for i in xrange(len(string) * 8):
+      self.SendTickerElementAndWait(string, wait)
+    self.ResetTicker()
 
   def ResetTicker(self):
     self.ticker = 0
     self.delta = 1
-
+    
 
 class Clock(object):
   def __init__(self, char_renderer, ticker):
@@ -169,7 +156,7 @@ class Clock(object):
 
   def _SendTimeTicker(self):
     string = datetime.datetime.now().strftime(' %H:%M ')
-    self.char_renderer.SendTickerStringAndWait(string, 0.1)
+    self.char_renderer.SendFullStringAndWait(string, 0.1)
 
   def SendTime(self):
     if self.ticker:
@@ -178,59 +165,28 @@ class Clock(object):
       self._SendTimeDiscrete()
 
   @staticmethod
-  def Renderer():
-    clock = Clock(CharRenderer(CharFrame(PngFontReader('8x8font_green.png').rgb8, 32)),
-                  True)
+  def Renderer(frame_sender):
+    font_reader = PngFontReader('8x8font_green.png')
+    char_frame = CharFrame(font_reader.rgb8, 32)
+    char_renderer = CharRenderer(char_frame, frame_sender)
+    clock = Clock(char_renderer, True)
     while True:
       clock.SendTime()
 
 
-class Ticker(object):
-  def __init__(self, char_renderer):
-    self.char_renderer = char_renderer
-  
-  def SendStringAndWait(self, string, wait):
-    for i in xrange(len(string) * 8):
-      self.char_renderer.SendTickerStringAndWait(string, wait)
-    self.char_renderer.ResetTicker()
-
-
-class TagLiner(object):
-  def __init__(self, tag_lines_url):
-    data = urllib.urlopen(tag_lines_url).readlines()
-    self.tag_lines = [x.replace('\n','').replace('\r','').strip() for x in data]
-    random.shuffle(self.tag_lines)
-
-  def GetRandomTagLine(self):
-    return random.choice(self.tag_lines)
-
-  @staticmethod
-  def Renderer():
-    tag_liner = TagLiner('http://www.textfiles.com/humor/TAGLINES/taglines.txt')
-    ticker = Ticker(CharRenderer(CharFrame(PngFontReader('8x8fontINV.png').rgb8, 0)))
-    while True:
-      ticker.SendStringAndWait(tag_liner.GetRandomTagLine(), 0.1)
-
-
-class TwitterTrending(object):
-  def __init__(self):
-    twitter_json = urllib.urlopen('http://api.twitter.com/1/trends/current.json').read()
-    twitter_data = json.loads(twitter_json)
-    self.topics = [t['name'].encode('ascii', errors='replace') for t in 
-                   twitter_data['trends'][twitter_data['trends'].keys()[0]]]
-
-  def GetTopics(self):
-    return '|'.join(self.topics)
-
-
 class Combined(object):
   @staticmethod
-  def Renderer():
-    char_renderer_0 = CharRenderer(CharFrame(PngFontReader('8x8fontINV.png').rgb8, 0))
-    ticker = Ticker(char_renderer_0)
-    tag_liner = TagLiner('http://www.textfiles.com/humor/TAGLINES/taglines.txt')
-    char_renderer_1 = CharRenderer(CharFrame(PngFontReader('8x8font_green.png').rgb8, 32))
-    clock = Clock(char_renderer_1, True)
+  def Renderer(frame_sender):
+    png_font_reader = PngFontReader('8x8fontINV.png')
+    char_frame = CharFrame(png_font_reader.rgb8, 0)
+    char_renderer_0 = CharRenderer(char_frame, frame_sender)
+    tag_liner = comms.UrlPlainTextFetcher('http://www.textfiles.com/humor/TAGLINES/taglines.txt')
+
+    png_font_reader = PngFontReader('8x8font_green.png')
+    char_frame = CharFrame(png_font_reader.rgb8, 32)
+    char_renderer = CharRenderer(char_frame, frame_sender)
+    clock = Clock(char_renderer, True)
+
     cycle = 0
     # Number of cycles required to cycle hh:mi back and forth.
     CLOCK_CYCLES = 6 * 8 * 2
@@ -245,17 +201,18 @@ class Combined(object):
           twitter_trending = TwitterTrending()
           text = twitter_trending.GetTopics()
         else:
-          text = tag_liner.GetRandomTagLine()
+          text = tag_liner.GetRandomLine()
         ticker.SendStringAndWait(text, 0.1)
         cycle = 0
 
 
 def main():
+  frame_sender = comms.UdpSender('localhost', 9000)
   #Randomness()
   #Pattern.Renderer()
   #Clock.Renderer()
   #TagLiner.Renderer()
-  Combined.Renderer()
+  Combined.Renderer(frame_sender)
 
 if __name__ == '__main__':
   main()

@@ -10,206 +10,80 @@
 # <http://www.gnu.org/licenses/>.
 
 
-import datetime
-import json
-import png
 import random
+import socket
 import struct
-import time
 import urllib
 
 
-class PngFontReader(object):
-  """Reads a png and stores a list of rows containing R, G, B."""
-  def __init__(self, filename):
-    self.png = png.Reader(filename=filename)
-    self.rgb8 = [row for row in self.png.asRGB8()[2]]
-
-
-class CharFrame(object):
-  """Used to obtain 4BPP frames from an image strip."""
-  def __init__(self, font_8bpp, first_char):
-    self.font_8bpp = font_8bpp
-    self.first_char = first_char
-
-  def _RGB8To4BPP(self, rgb8):
-    ret = []
-    for i in xrange(len(rgb8) - 1, 0, -6):
-      # Packs 2 RGB8 pixels in 3 bytes
-      ret += [(rgb8[i - 2] >> 4) |
-              ((rgb8[i - 1] >> 4) << 4),
-              (rgb8[i] >> 4) |
-              ((rgb8[i - 5] >> 4) << 4),
-              (rgb8[i - 4] >> 4) |
-              ((rgb8[i - 3] >> 4) << 4)]
-    return ret
-
-  def ForChar(self, char):
-    """Returns an 8x8x4bpp frame for the given char."""
-    col_start = (ord(char) - self.first_char) * 8 * 3
-    rgb8 = []
-    for row in xrange(8):
-      rgb8 += self.font_8bpp[row][col_start : col_start + 8 * 3]
-    ret = self._RGB8To4BPP(rgb8)
-    return ret
-
-  def ForString(self, string, start_pixel_column):
-    """Returns an 8x8x4bpp frame for the given string, starting at start_pixel_column."""
-    char_0 = start_pixel_column / 8
-    char_0_num_pixels = 8 - (start_pixel_column % 8)
-    char_0_col_start = (ord(string[char_0]) - self.first_char) * 8 * 3
-    char_1_col_start = (ord(string[(start_pixel_column + 7) / 8]) - self.first_char) * 8 * 3
-    rgb8 = []
-    for row in xrange(8):
-      rgb8 += (self.font_8bpp[row][char_0_col_start + (8 - char_0_num_pixels) * 3 :
-                                   char_0_col_start + 8 * 3] +
-               self.font_8bpp[row][char_1_col_start :
-                                   char_1_col_start + (8 - char_0_num_pixels) * 3])
-    ret = self._RGB8To4BPP(rgb8)
-    return ret
-
-
 class FrameSender(object):
+  @staticmethod
+  def PackFrame(frame):
+    return struct.pack('B' * 8 * 12, *frame)
+    
+  def Send(self, packed_frame):
+    pass
+
+  def Close():
+    pass
+
+class SerialSender(FrameSender):
   """Sends a 8x8x4bpp RGB frame to rainbowduino over serial."""
-  def __init__(self):
-    self.serial = file('/dev/ttyUSB0', 'w')
+  def __init__(self, serial_file_name='/dev/ttyUSB0'):
+    self.serial = file(serial_file_name, 'w')
     self.last_frame = None
 
   def Close():
     self.serial.close()
 
-  def Send(self, frame):
-    if self.last_frame == frame:
+  def Send(self, packed_frame):
+    if self.last_frame == packed_frame:
       return
-    self.last_frame = frame
-    d = struct.pack('B' * 8 * 12, *frame)
-    self.serial.write(d)
+    self.last_frame = packed_frame
+    self.serial.write(packed_frame)
     self.serial.flush()
 
 
-def Randomness():
-  """Some randomness to check things blink."""
-  frame = []
-  frame += [0xf0,0x07, 0x07, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-  frame += [0x0f,0x07, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-  frame += [0x00,0xf0, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-  frame += [0] * (96 - len(frame))
-  sender = FrameSender()
-  sender.Send(frame)
-  frame = [0, 0xf0, 0x0f, 0x77, 0x70, 0x07]
-  frame = (frame * 20)[:96]
-  while True:
-    random.shuffle(frame)
-    sender.Send(frame)
-    time.sleep(0.2)
+class UdpSender(FrameSender):
+  """Sends a 8x8x4bpp RGB frame to rainbowduino over UDP to a server."""
+  def __init__(self, host, port):
+    self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.host_port = (host, port)
+    self.last_frame = ''
+    
+  def Close():
+    self.s.close()
+
+  def Send(self, packed_frame):
+    print 'Sending...'
+    if self.last_frame == packed_frame:
+      return
+    self.last_frame = packed_frame
+    self.s.sendto(packed_frame, self.host_port)
+    print 'Sent...'
 
 
-class Pattern(object):
-  def __init__(self):
-    self.sender = FrameSender()
-    self.red = [x for x in [0x07, 0xf0, 0x00] * 32]
-    self.green = [x for x in [0x70, 0x00, 0x0f] * 32]
-    self.blue = [x for x in [0x00, 0x07, 0xf0] * 32]
-    self.rg = [x for x in [0x77, 0x00, 0x00] * 32]
-    self.rb = [x for x in [0x07, 0x07, 0x00] * 32]
-    self.gb = [x for x in [0x70, 0x07, 0x00] * 32]
-
-  @staticmethod
-  def Renderer():
-    pattern = Pattern()
+class UdpBridge(object):
+  """Receives a 8x8x4bpp RGB frame from UDP and sends to rainbowduino over serial."""
+  def __init__(self, host, port, serial):
+    self.serial_frame = SerialSender(serial)
+    self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.s.bind((host, port))
+    
+  def Loop(self):
     while True:
-      for p in [pattern.red,
-                pattern.green,
-                pattern.blue,
-                pattern.rg, pattern.rb, pattern.gb]:
-        pattern.sender.Send(p)
-        time.sleep(0.2)
+      data, addr = self.s.recvfrom(8 * 12)
+      self.serial_frame.Send(data)
 
 
-class CharRenderer(object):
-  def __init__(self, char_frame):
-    self.char_frame = char_frame
-    self.ticker = 0
-    self.delta = 1
-    self.sender = FrameSender()
-
-  def SendCharAndWait(self, char, wait):
-    self.sender.Send(self.char_frame.ForChar(str(char)))
-    time.sleep(wait)
-
-  def SendTickerStringAndWait(self, string, wait):
-    self.ticker += self.delta
-    if self.ticker >= (len(string) - 1) * 8:
-      self.delta *= -1
-      self.ticker = (len(string) - 1) * 8
-    elif self.ticker <= 0:
-      self.delta *= -1
-      self.ticker = 0
-    self.sender.Send(self.char_frame.ForString(string, self.ticker))
-    time.sleep(wait)
-
-  def ResetTicker(self):
-    self.ticker = 0
-    self.delta = 1
-
-
-class Clock(object):
-  def __init__(self, char_renderer, ticker):
-    self.char_renderer = char_renderer
-    self.ticker = ticker
-
-  def _SendTimeDiscrete(self):
-    now = datetime.datetime.now()
-    self.char_renderer.SendCharAndWait(now.hour / 10, 0.8)
-    self.char_renderer.SendCharAndWait(now.hour % 10, 0.8)
-    self.char_renderer.SendCharAndWait(':', 0.2)
-    self.char_renderer.SendCharAndWait(now.minute / 10, 0.8)
-    self.char_renderer.SendCharAndWait(now.minute % 10, 0.8)
-    self.char_renderer.SendCharAndWait('*', 0.8)
-
-  def _SendTimeTicker(self):
-    string = datetime.datetime.now().strftime(' %H:%M ')
-    self.char_renderer.SendTickerStringAndWait(string, 0.1)
-
-  def SendTime(self):
-    if self.ticker:
-      self._SendTimeTicker()
-    else:
-      self._SendTimeDiscrete()
-
-  @staticmethod
-  def Renderer():
-    clock = Clock(CharRenderer(CharFrame(PngFontReader('8x8font_green.png').rgb8, 32)),
-                  True)
-    while True:
-      clock.SendTime()
-
-
-class Ticker(object):
-  def __init__(self, char_renderer):
-    self.char_renderer = char_renderer
-  
-  def SendStringAndWait(self, string, wait):
-    for i in xrange(len(string) * 8):
-      self.char_renderer.SendTickerStringAndWait(string, wait)
-    self.char_renderer.ResetTicker()
-
-
-class TagLiner(object):
+class UrlPlainTextFetcher(object):
   def __init__(self, tag_lines_url):
     data = urllib.urlopen(tag_lines_url).readlines()
-    self.tag_lines = [x.replace('\n','').replace('\r','').strip() for x in data]
-    random.shuffle(self.tag_lines)
+    self.lines = [x.replace('\n','').replace('\r','').strip() for x in data]
+    random.shuffle(self.lines)
 
-  def GetRandomTagLine(self):
-    return random.choice(self.tag_lines)
-
-  @staticmethod
-  def Renderer():
-    tag_liner = TagLiner('http://www.textfiles.com/humor/TAGLINES/taglines.txt')
-    ticker = Ticker(CharRenderer(CharFrame(PngFontReader('8x8fontINV.png').rgb8, 0)))
-    while True:
-      ticker.SendStringAndWait(tag_liner.GetRandomTagLine(), 0.1)
+  def GetRandomLine(self):
+    return random.choice(self.line)
 
 
 class TwitterTrending(object):
@@ -221,41 +95,3 @@ class TwitterTrending(object):
 
   def GetTopics(self):
     return '|'.join(self.topics)
-
-
-class Combined(object):
-  @staticmethod
-  def Renderer():
-    char_renderer_0 = CharRenderer(CharFrame(PngFontReader('8x8fontINV.png').rgb8, 0))
-    ticker = Ticker(char_renderer_0)
-    tag_liner = TagLiner('http://www.textfiles.com/humor/TAGLINES/taglines.txt')
-    char_renderer_1 = CharRenderer(CharFrame(PngFontReader('8x8font_green.png').rgb8, 32))
-    clock = Clock(char_renderer_1, True)
-    cycle = 0
-    # Number of cycles required to cycle hh:mi back and forth.
-    CLOCK_CYCLES = 6 * 8 * 2
-    twitter_toggle = False
-    while True:
-      if cycle < CLOCK_CYCLES:
-        cycle += 1
-        clock.SendTime()
-      else:
-        twitter_toggle = not twitter_toggle
-        if twitter_toggle:
-          twitter_trending = TwitterTrending()
-          text = twitter_trending.GetTopics()
-        else:
-          text = tag_liner.GetRandomTagLine()
-        ticker.SendStringAndWait(text, 0.1)
-        cycle = 0
-
-
-def main():
-  #Randomness()
-  #Pattern.Renderer()
-  #Clock.Renderer()
-  #TagLiner.Renderer()
-  Combined.Renderer()
-
-if __name__ == '__main__':
-  main()
