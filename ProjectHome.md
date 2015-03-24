@@ -1,0 +1,3 @@
+This project contains:
+  1. rainbowduino firmware to blit incoming framebuffers from serial
+  1. host side python to send framebuffers, plus a few utilities, such as font generator, clock, tagliner, etc...
